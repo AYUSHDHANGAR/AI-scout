@@ -15,7 +15,7 @@ import json
 import math
 import re
 from collections import Counter
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -229,6 +229,20 @@ WELCOME_LOCATION_TERMS = [
     "chennai",
 ]
 
+DISPLAY_REPLACEMENTS = (
+    ("\u2014", "-"),
+    ("\u2013", "-"),
+    ("\u2192", "->"),
+    ("\u00a0", " "),
+    ("â€”", "-"),
+    ("â€“", "-"),
+    ("â†’", "->"),
+)
+
+YEAR_EXPERIENCE_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\+?\s+years?(?:\s+of)?(?:\s+[\w-]+){0,3}\s+experience"
+)
+
 
 def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return max(low, min(high, value))
@@ -238,13 +252,21 @@ def parse_date(value: str | None) -> date | None:
     if not value:
         return None
     try:
-        return datetime.strptime(value, "%Y-%m-%d").date()
-    except ValueError:
+        year, month, day = value[:10].split("-")
+        return date(int(year), int(month), int(day))
+    except (TypeError, ValueError):
         return None
 
 
+def clean_display_text(value: Any) -> str:
+    text = "" if value is None else str(value)
+    for source, replacement in DISPLAY_REPLACEMENTS:
+        text = text.replace(source, replacement)
+    return " ".join(text.split())
+
+
 def norm_text(value: str) -> str:
-    return re.sub(r"\s+", " ", value.lower().replace("–", "-").replace("—", "-"))
+    return clean_display_text(value).lower()
 
 
 def build_text(candidate: dict[str, Any]) -> str:
@@ -282,6 +304,51 @@ def skill_strength(skill: dict[str, Any]) -> float:
     duration_factor = 0.55 + 0.45 * clamp(duration / 30.0)
     endorsement_factor = 1.0 + min(0.25, math.log1p(endorsements) / 18.0)
     return proficiency * duration_factor * endorsement_factor
+
+
+def relevant_assessment_score(candidate: dict[str, Any]) -> tuple[float, list[str]]:
+    scores = candidate["redrob_signals"].get("skill_assessment_scores", {}) or {}
+    if not scores:
+        return 0.50, []
+
+    relevant_keys = (
+        RETRIEVAL_SKILLS
+        | RANKING_SKILLS
+        | ML_SYSTEM_SKILLS
+        | LLM_TUNING_SKILLS
+        | {"nlp", "python", "machine learning", "data science"}
+    )
+    relevant: list[tuple[str, float]] = []
+    adjacent: list[float] = []
+    for name, raw_score in scores.items():
+        key = clean_display_text(name).lower()
+        try:
+            value = clamp(float(raw_score) / 100.0)
+        except (TypeError, ValueError):
+            continue
+        if key in relevant_keys or any(
+            term in key
+            for term in [
+                "retrieval",
+                "search",
+                "ranking",
+                "recommendation",
+                "embedding",
+                "vector",
+                "llm",
+            ]
+        ):
+            relevant.append((name, value))
+        else:
+            adjacent.append(value)
+
+    if relevant:
+        relevant.sort(key=lambda item: item[1], reverse=True)
+        average = sum(value for _, value in relevant) / len(relevant)
+        return average, [name for name, _ in relevant[:4]]
+    if adjacent:
+        return 0.40 + 0.20 * (sum(adjacent) / len(adjacent)), []
+    return 0.50, []
 
 
 def score_skill_group(
@@ -419,7 +486,10 @@ def logistics_fit(candidate: dict[str, Any]) -> tuple[float, str]:
     return 0.48 * location_score + 0.34 * notice_score + 0.18 * mode_score, location_label
 
 
-def behavior_fit(candidate: dict[str, Any]) -> tuple[float, dict[str, float]]:
+def behavior_fit(
+    candidate: dict[str, Any],
+    assessment: float | None = None,
+) -> tuple[float, dict[str, float]]:
     signals = candidate["redrob_signals"]
     last_active = parse_date(signals.get("last_active_date"))
     days_inactive = 999
@@ -446,6 +516,13 @@ def behavior_fit(candidate: dict[str, Any]) -> tuple[float, dict[str, float]]:
     interview = clamp(float(signals.get("interview_completion_rate") or 0))
     github_raw = float(signals.get("github_activity_score") or -1)
     github = 0.18 if github_raw < 0 else clamp(github_raw / 100.0)
+    views = clamp(math.log1p(float(signals.get("profile_views_received_30d") or 0)) / math.log1p(400))
+    search = clamp(math.log1p(float(signals.get("search_appearance_30d") or 0)) / math.log1p(800))
+    applications = clamp(math.log1p(float(signals.get("applications_submitted_30d") or 0)) / math.log1p(20))
+    endorsements = clamp(math.log1p(float(signals.get("endorsements_received") or 0)) / math.log1p(250))
+    market_demand = 0.34 * views + 0.28 * saved + 0.26 * search + 0.12 * endorsements
+    if assessment is None:
+        assessment, _ = relevant_assessment_score(candidate)
     verified = (
         (1.0 if signals.get("verified_email") else 0.0)
         + (1.0 if signals.get("verified_phone") else 0.0)
@@ -459,20 +536,25 @@ def behavior_fit(candidate: dict[str, Any]) -> tuple[float, dict[str, float]]:
         "open_to_work": open_to_work,
         "completeness": completeness,
         "saved": saved,
+        "market_demand": market_demand,
+        "applications": applications,
         "interview": interview,
         "github": github,
+        "assessment": assessment,
         "verified": verified,
     }
     score = (
-        0.18 * recency
-        + 0.20 * response_rate
-        + 0.08 * response_speed
-        + 0.13 * open_to_work
-        + 0.09 * completeness
-        + 0.08 * saved
-        + 0.08 * interview
-        + 0.10 * github
-        + 0.06 * verified
+        0.16 * recency
+        + 0.18 * response_rate
+        + 0.07 * response_speed
+        + 0.12 * open_to_work
+        + 0.07 * completeness
+        + 0.10 * market_demand
+        + 0.05 * applications
+        + 0.07 * interview
+        + 0.08 * github
+        + 0.06 * assessment
+        + 0.04 * verified
     )
     return score, parts
 
@@ -480,10 +562,7 @@ def behavior_fit(candidate: dict[str, Any]) -> tuple[float, dict[str, float]]:
 def text_year_mismatch(profile: dict[str, Any]) -> float:
     summary = profile.get("summary", "")
     years = float(profile.get("years_of_experience") or 0)
-    mentions = [
-        float(match)
-        for match in re.findall(r"(\d+(?:\.\d+)?)\+?\s+years? of experience", summary.lower())
-    ]
+    mentions = [float(match) for match in YEAR_EXPERIENCE_RE.findall(summary.lower())]
     if not mentions:
         return 0.0
     nearest = min(abs(years - mentioned) for mentioned in mentions)
@@ -491,6 +570,27 @@ def text_year_mismatch(profile: dict[str, Any]) -> float:
         return 0.65
     if nearest > 3.0:
         return 0.35
+    return 0.0
+
+
+def career_timeline_mismatch(candidate: dict[str, Any]) -> float:
+    years = float(candidate["profile"].get("years_of_experience") or 0)
+    durations = [
+        int(job.get("duration_months") or 0)
+        for job in candidate.get("career_history", [])
+        if int(job.get("duration_months") or 0) > 0
+    ]
+    if not durations or not years:
+        return 0.0
+
+    career_years = sum(durations) / 12.0
+    diff = abs(years - career_years)
+    if diff > 6.0:
+        return 0.75
+    if diff > 4.0:
+        return 0.45
+    if diff > 2.8:
+        return 0.22
     return 0.0
 
 
@@ -502,6 +602,8 @@ def anti_signal_penalty(
     production: float,
     role: float,
     service_only: bool,
+    assessment: float,
+    assessment_names: list[str],
 ) -> tuple[float, list[str]]:
     profile = candidate["profile"]
     signals = candidate["redrob_signals"]
@@ -538,10 +640,20 @@ def anti_signal_penalty(
     if any(word in title for word in ["senior", "lead", "staff"]) and years < 4.0:
         penalty += 7.0
         concerns.append("seniority/title is hard to reconcile with total experience")
+    if years < 4.0:
+        penalty += 4.0
+        concerns.append("below the preferred 5-9 year experience band")
+    elif years > 13.0:
+        penalty += 4.0
+        concerns.append("well above the preferred 5-9 year experience band")
     mismatch = text_year_mismatch(profile)
     if mismatch:
         penalty += 6.0 * mismatch
         concerns.append("profile summary and structured experience years are inconsistent")
+    timeline_mismatch = career_timeline_mismatch(candidate)
+    if timeline_mismatch:
+        penalty += 7.0 * timeline_mismatch
+        concerns.append("career timeline does not support the stated experience")
     if service_only:
         penalty += 6.0
         concerns.append("career appears services/consulting-only")
@@ -557,6 +669,20 @@ def anti_signal_penalty(
     if count_hits(text, ["research", "paper", "academic"]) >= 2 and production < 0.45:
         penalty += 4.0
         concerns.append("research-leaning evidence without enough deployment signal")
+
+    if assessment_names and assessment < 0.55 and (retrieval > 0.75 or ranking > 0.75):
+        penalty += 4.0
+        concerns.append("assessment scores are weaker than the listed AI/search skills")
+
+    short_senior_jobs = [
+        job
+        for job in candidate.get("career_history", [])
+        if int(job.get("duration_months") or 0) <= 18
+        and any(token in job.get("title", "").lower() for token in ["senior", "lead", "staff"])
+    ]
+    if len(candidate.get("career_history", [])) >= 3 and len(short_senior_jobs) >= 2:
+        penalty += 3.5
+        concerns.append("frequent short senior-role moves may hurt founding-team stability")
 
     cv_speech_strength, _ = score_skill_group(skills, CV_SPEECH_SKILLS, cap=4.0)
     if cv_speech_strength > 0.70 and retrieval < 0.45:
@@ -587,22 +713,24 @@ def score_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     production = production_text
     ml_systems = 0.75 * ml_skill + 0.25 * production_text
     llm = 0.80 * llm_skill + 0.20 * retrieval_text
+    assessment, assessment_names = relevant_assessment_score(candidate)
 
     technical = (
-        0.30 * retrieval
-        + 0.20 * ranking
-        + 0.18 * evaluation
-        + 0.15 * production
-        + 0.11 * ml_systems
-        + 0.06 * llm
+        0.29 * retrieval
+        + 0.18 * ranking
+        + 0.17 * evaluation
+        + 0.14 * production
+        + 0.10 * ml_systems
+        + 0.05 * llm
+        + 0.07 * assessment
     )
     role = role_fit(candidate, retrieval, ranking, production)
     experience = experience_fit(float(profile.get("years_of_experience") or 0))
     company, service_only = company_fit(candidate)
     logistics, location_label = logistics_fit(candidate)
-    behavior, behavior_parts = behavior_fit(candidate)
+    behavior, behavior_parts = behavior_fit(candidate, assessment)
     penalty, concerns = anti_signal_penalty(
-        candidate, text, retrieval, ranking, production, role, service_only
+        candidate, text, retrieval, ranking, production, role, service_only, assessment, assessment_names
     )
 
     score_100 = (
@@ -617,7 +745,7 @@ def score_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     )
     normalized = clamp(score_100 / 100.0)
 
-    core_names = unique_ordered(retrieval_names + ranking_names + ml_names + llm_names)
+    core_names = unique_ordered(retrieval_names + ranking_names + ml_names + llm_names + assessment_names)
     evidence = []
     if retrieval > 0.55:
         evidence.append("retrieval")
@@ -648,6 +776,7 @@ def score_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
             "ranking": round(ranking * 100, 1),
             "evaluation": round(evaluation * 100, 1),
             "production": round(production * 100, 1),
+            "assessment": round(assessment * 100, 1),
         },
         "behavior_parts": {key: round(value * 100, 1) for key, value in behavior_parts.items()},
         "matched_skills": core_names[:10],
@@ -683,17 +812,53 @@ def top_career_evidence(scored: dict[str, Any]) -> str:
     return "career text includes production ML delivery signals"
 
 
+def recruiter_ready(scored: dict[str, Any]) -> bool:
+    signals = scored["signals"]
+    return (
+        bool(signals.get("open_to_work_flag"))
+        and int(signals.get("notice_period_days") or 180) <= 60
+        and float(signals.get("recruiter_response_rate") or 0) >= 0.60
+        and scored["breakdown"]["behavior"] >= 60
+    )
+
+
+def risk_level(scored: dict[str, Any]) -> str:
+    penalty = scored["breakdown"]["penalty"]
+    if penalty >= 10 or len(scored["concerns"]) >= 3:
+        return "high"
+    if penalty >= 5 or scored["concerns"]:
+        return "watch"
+    return "clear"
+
+
+def readiness_score(scored: dict[str, Any]) -> float:
+    breakdown = scored["breakdown"]
+    signals = scored["signals"]
+    response = clamp(float(signals.get("recruiter_response_rate") or 0))
+    notice = int(signals.get("notice_period_days") or 180)
+    notice_fit = 1.0 if notice <= 30 else 0.75 if notice <= 60 else 0.38 if notice <= 90 else 0.12
+    return round(
+        0.30 * breakdown["technical"]
+        + 0.25 * breakdown["behavior"]
+        + 0.20 * breakdown["logistics"]
+        + 15.0 * response
+        + 10.0 * notice_fit,
+        1,
+    )
+
+
 def make_reasoning(scored: dict[str, Any]) -> str:
     profile = scored["profile"]
     signals = scored["signals"]
-    title = profile.get("current_title", "Candidate")
+    title = clean_display_text(profile.get("current_title", "Candidate"))
     years = float(profile.get("years_of_experience") or 0)
-    company = profile.get("current_company", "current company")
-    location = profile.get("location", "unknown location")
-    skills = ", ".join(scored["matched_skills"][:4]) or "relevant ML skills"
+    company = clean_display_text(profile.get("current_company", "current company"))
+    location = clean_display_text(profile.get("location", "unknown location"))
+    skills = ", ".join(clean_display_text(skill) for skill in scored["matched_skills"][:4]) or "relevant ML skills"
     response = float(signals.get("recruiter_response_rate") or 0)
     notice = int(signals.get("notice_period_days") or 0)
     active = signals.get("last_active_date", "unknown")
+    location_label = scored["location_label"]
 
     first = (
         f"{title} with {years:.1f} yrs at {company}; "
@@ -701,6 +866,7 @@ def make_reasoning(scored: dict[str, Any]) -> str:
     )
     second_bits = [
         f"{location}",
+        location_label,
         f"{response:.0%} recruiter response",
         f"last active {active}",
         f"{notice}-day notice",
@@ -719,25 +885,30 @@ def dashboard_candidate(scored: dict[str, Any], rank: int) -> dict[str, Any]:
     current_job = career[0] if career else {}
     salary = signals.get("expected_salary_range_inr_lpa", {})
     education = scored.get("education", [])
+    skill_assessments = signals.get("skill_assessment_scores", {}) or {}
     return {
         "candidate_id": scored["candidate_id"],
         "rank": rank,
         "score": round(scored["score"], 4),
-        "name": profile.get("anonymized_name", ""),
-        "title": profile.get("current_title", ""),
-        "headline": profile.get("headline", ""),
-        "summary": profile.get("summary", ""),
-        "company": profile.get("current_company", ""),
-        "industry": profile.get("current_industry", ""),
-        "company_size": profile.get("current_company_size", ""),
-        "location": profile.get("location", ""),
-        "country": profile.get("country", ""),
+        "score_100": round(scored["score_100"], 2),
+        "readiness": readiness_score(scored),
+        "risk_level": risk_level(scored),
+        "recruiter_ready": recruiter_ready(scored),
+        "name": clean_display_text(profile.get("anonymized_name", "")),
+        "title": clean_display_text(profile.get("current_title", "")),
+        "headline": clean_display_text(profile.get("headline", "")),
+        "summary": clean_display_text(profile.get("summary", "")),
+        "company": clean_display_text(profile.get("current_company", "")),
+        "industry": clean_display_text(profile.get("current_industry", "")),
+        "company_size": clean_display_text(profile.get("current_company_size", "")),
+        "location": clean_display_text(profile.get("location", "")),
+        "country": clean_display_text(profile.get("country", "")),
         "years": profile.get("years_of_experience", 0),
-        "current_work": current_job.get("description", ""),
-        "matched_skills": scored["matched_skills"][:8],
+        "current_work": clean_display_text(current_job.get("description", "")),
+        "matched_skills": [clean_display_text(skill) for skill in scored["matched_skills"][:8]],
         "all_skills": [
             {
-                "name": skill.get("name", ""),
+                "name": clean_display_text(skill.get("name", "")),
                 "proficiency": skill.get("proficiency", ""),
                 "duration_months": skill.get("duration_months", 0),
                 "endorsements": skill.get("endorsements", 0),
@@ -751,7 +922,11 @@ def dashboard_candidate(scored: dict[str, Any], rank: int) -> dict[str, Any]:
             "response_time_hours": signals.get("avg_response_time_hours"),
             "notice_days": signals.get("notice_period_days"),
             "github": signals.get("github_activity_score"),
+            "profile_views": signals.get("profile_views_received_30d"),
+            "applications": signals.get("applications_submitted_30d"),
+            "search_appearance": signals.get("search_appearance_30d"),
             "saved": signals.get("saved_by_recruiters_30d"),
+            "endorsements": signals.get("endorsements_received"),
             "profile_completeness": signals.get("profile_completeness_score"),
             "interview_completion": signals.get("interview_completion_rate"),
             "offer_acceptance": signals.get("offer_acceptance_rate"),
@@ -759,6 +934,15 @@ def dashboard_candidate(scored: dict[str, Any], rank: int) -> dict[str, Any]:
             "relocate": signals.get("willing_to_relocate"),
             "salary_min": salary.get("min"),
             "salary_max": salary.get("max"),
+            "assessment_count": len(skill_assessments),
+            "best_assessments": sorted(
+                [
+                    {"skill": clean_display_text(name), "score": round(float(value), 1)}
+                    for name, value in skill_assessments.items()
+                ],
+                key=lambda item: item["score"],
+                reverse=True,
+            )[:5],
             "verified_email": signals.get("verified_email"),
             "verified_phone": signals.get("verified_phone"),
             "linkedin_connected": signals.get("linkedin_connected"),
@@ -768,19 +952,27 @@ def dashboard_candidate(scored: dict[str, Any], rank: int) -> dict[str, Any]:
         "evidence": scored["evidence"],
         "concerns": scored["concerns"],
         "location_label": scored["location_label"],
-        "reasoning": make_reasoning(scored),
+        "reasoning": clean_display_text(make_reasoning(scored)),
         "career": [
             {
-                "title": job.get("title", ""),
-                "company": job.get("company", ""),
-                "industry": job.get("industry", ""),
+                "title": clean_display_text(job.get("title", "")),
+                "company": clean_display_text(job.get("company", "")),
+                "industry": clean_display_text(job.get("industry", "")),
                 "duration_months": job.get("duration_months", 0),
                 "is_current": job.get("is_current", False),
-                "description": job.get("description", ""),
+                "description": clean_display_text(job.get("description", "")),
             }
             for job in career[:4]
         ],
-        "education": education,
+        "education": [
+            {
+                **item,
+                "institution": clean_display_text(item.get("institution", "")),
+                "degree": clean_display_text(item.get("degree", "")),
+                "field_of_study": clean_display_text(item.get("field_of_study", "")),
+            }
+            for item in education
+        ],
     }
 
 
@@ -806,6 +998,7 @@ def summary_payload(scored_top: list[dict[str, Any]], total_count: int) -> dict[
     skill_counter: Counter[str] = Counter()
     for item in top100:
         skill_counter.update(item["matched_skills"][:6])
+    risk_counter = Counter(risk_level(item) for item in top100)
 
     def avg(key: str) -> float:
         if not top100:
@@ -822,6 +1015,15 @@ def summary_payload(scored_top: list[dict[str, Any]], total_count: int) -> dict[
         "top10_average_score": round(sum(item["score"] for item in top100[:10]) / 10, 4)
         if len(top100) >= 10
         else 0,
+        "recruiter_ready_count": sum(1 for item in top100 if recruiter_ready(item)),
+        "preferred_city_count": sum(
+            1 for item in top100 if item["location_label"] == "preferred office city"
+        ),
+        "india_count": sum(1 for item in top100 if item["profile"].get("country") == "India"),
+        "concern_count": sum(1 for item in top100 if item["concerns"]),
+        "clear_risk_count": risk_counter.get("clear", 0),
+        "watch_risk_count": risk_counter.get("watch", 0),
+        "high_risk_count": risk_counter.get("high", 0),
         "average_breakdown": {
             "technical": avg("technical"),
             "role": avg("role"),
@@ -833,6 +1035,7 @@ def summary_payload(scored_top: list[dict[str, Any]], total_count: int) -> dict[
             "ranking": avg("ranking"),
             "evaluation": avg("evaluation"),
             "production": avg("production"),
+            "assessment": avg("assessment"),
         },
         "top_titles": title_counter.most_common(8),
         "top_locations": city_counter.most_common(8),
@@ -897,6 +1100,16 @@ def write_outputs(scored: list[dict[str, Any]], total_count: int) -> None:
             {"label": "Cross-check: retrieval plus production/eval", "weight": 8},
             {"label": "Anti-signal penalties", "weight": "dynamic"},
         ],
+        "methodology": {
+            "positioning": "Offline, deterministic ranker optimized for the JD's real intent: production retrieval/ranking builders who are reachable now.",
+            "quality_gates": [
+                "Career evidence must support retrieval, ranking, evaluation, or production ML claims.",
+                "Skill claims are cross-checked with duration, endorsements, assessments, title, and career text.",
+                "Behavioral availability adjusts the rank so unreachable candidates do not crowd out hireable ones.",
+                "Honeypot-style contradictions trigger explicit penalties and show up as concerns.",
+            ],
+            "runtime": "CPU-only, no network calls, one deterministic pass over candidates.jsonl.",
+        },
         "summary": summary_payload(top100, total_count),
         "candidates": candidates,
     }

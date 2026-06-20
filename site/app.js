@@ -15,7 +15,9 @@ const elements = {
   roleMeta: document.querySelector("#roleMeta"),
   mustHaveList: document.querySelector("#mustHaveList"),
   weightList: document.querySelector("#weightList"),
+  qualityGates: document.querySelector("#qualityGates"),
   metricGrid: document.querySelector("#metricGrid"),
+  qualityBoard: document.querySelector("#qualityBoard"),
   keywordDock: document.querySelector("#keywordDock"),
   spotlight: document.querySelector("#spotlight"),
   candidateList: document.querySelector("#candidateList"),
@@ -162,6 +164,12 @@ function chip(label, variant = "") {
   return `<span class="status-chip ${variant}">${label}</span>`;
 }
 
+function riskLabel(candidate) {
+  if (candidate.risk_level === "high") return chip("high risk", "bad");
+  if (candidate.risk_level === "watch") return chip("watch", "warn");
+  return chip("clear risk");
+}
+
 function skillChips(skills) {
   return skills.map((skill) => `<span class="skill-chip">${skill}</span>`).join("");
 }
@@ -212,6 +220,17 @@ function renderRole() {
       `,
     )
     .join("");
+
+  elements.qualityGates.innerHTML = data.methodology.quality_gates
+    .map(
+      (gate) => `
+        <div class="gate-item">
+          <span class="need-dot"></span>
+          <span>${gate}</span>
+        </div>
+      `,
+    )
+    .join("");
 }
 
 function renderMetrics() {
@@ -220,7 +239,7 @@ function renderMetrics() {
     ["Candidate pool", compactNumber(summary.total_candidates_scanned), "Profiles scanned offline"],
     ["Shortlist", summary.shortlist_size, "Valid top-ranked rows"],
     ["Top score", score(summary.top_score), "Best-fit composite"],
-    ["Cutoff score", score(summary.cutoff_score), "Rank 100 threshold"],
+    ["Recruiter-ready", summary.recruiter_ready_count, "Open, responsive, <= 60d notice"],
   ];
 
   elements.metricGrid.innerHTML = metrics
@@ -234,6 +253,37 @@ function renderMetrics() {
       `,
     )
     .join("");
+}
+
+function renderQualityBoard() {
+  const summary = data.summary;
+  const board = [
+    ["Preferred cities", summary.preferred_city_count, "Pune / Noida matches"],
+    ["India fit", summary.india_count, "India-based shortlisted profiles"],
+    ["Clear risk", summary.clear_risk_count, "No major anti-signal"],
+    ["Watch list", summary.watch_risk_count + summary.high_risk_count, "Concern-aware but still ranked"],
+  ];
+
+  elements.qualityBoard.innerHTML = `
+    <div class="quality-copy">
+      <span class="eyebrow">Shortlist intelligence</span>
+      <h2>${data.methodology.positioning}</h2>
+      <p>${data.methodology.runtime}</p>
+    </div>
+    <div class="quality-grid">
+      ${board
+        .map(
+          ([label, value, helper]) => `
+            <article class="quality-card">
+              <span>${label}</span>
+              <strong>${value}</strong>
+              <span>${helper}</span>
+            </article>
+          `,
+        )
+        .join("")}
+    </div>
+  `;
 }
 
 function renderSpotlight() {
@@ -254,6 +304,11 @@ function renderSpotlight() {
         <span class="rank-badge">#${candidate.rank}</span>
       </div>
       <p>${candidate.reasoning}</p>
+      <div class="chip-row">
+        ${chip(`${Math.round(candidate.readiness)} readiness`)}
+        ${candidate.recruiter_ready ? chip("recruiter-ready") : chip("needs recruiter judgment", "warn")}
+        ${riskLabel(candidate)}
+      </div>
       <div class="chip-row">${skillChips(candidate.matched_skills.slice(0, 6))}</div>
     </div>
     <div>
@@ -271,6 +326,8 @@ function renderSpotlight() {
 
 function candidateStatus(candidate) {
   const statuses = [];
+  statuses.push(chip(`${Math.round(candidate.readiness)} readiness`));
+  statuses.push(riskLabel(candidate));
   statuses.push(candidate.signals.open_to_work ? chip("open to work") : chip("not open", "warn"));
   statuses.push(
     candidate.signals.notice_days <= 30
@@ -344,7 +401,11 @@ function signalRows(candidate) {
     ["Avg response", `${Math.round(candidate.signals.response_time_hours)}h`],
     ["Notice", `${candidate.signals.notice_days} days`],
     ["GitHub", candidate.signals.github < 0 ? "Not linked" : Math.round(candidate.signals.github)],
+    ["Profile views", candidate.signals.profile_views],
+    ["Search appearances", candidate.signals.search_appearance],
     ["Saved by recruiters", candidate.signals.saved],
+    ["Applications", candidate.signals.applications],
+    ["Assessments", candidate.signals.assessment_count],
     ["Work mode", candidate.signals.work_mode],
     ["Relocation", candidate.signals.relocate ? "Yes" : "No"],
   ];
@@ -392,6 +453,21 @@ function renderDetail(candidate) {
     <p class="reason">${candidate.headline}</p>
     <p class="profile-summary">${candidate.summary}</p>
 
+    <div class="readiness-strip">
+      <div>
+        <span>Readiness</span>
+        <strong>${Math.round(candidate.readiness)}</strong>
+      </div>
+      <div>
+        <span>Risk</span>
+        <strong>${candidate.risk_level}</strong>
+      </div>
+      <div>
+        <span>Composite</span>
+        <strong>${candidate.score_100}</strong>
+      </div>
+    </div>
+
     <div class="detail-grid">
       <div class="detail-stat"><span>Company</span><strong>${candidate.company}</strong></div>
       <div class="detail-stat"><span>Location</span><strong>${candidate.location}</strong></div>
@@ -410,6 +486,7 @@ function renderDetail(candidate) {
         ${bar("logistics", candidate.breakdown.logistics)}
         ${bar("retrieval", candidate.breakdown.retrieval)}
         ${bar("evaluation", candidate.breakdown.evaluation)}
+        ${bar("assessment", candidate.breakdown.assessment)}
       </div>
     </div>
 
@@ -427,6 +504,17 @@ function renderDetail(candidate) {
     <div class="detail-section">
       <h3>Behavior Signals</h3>
       ${signalRows(candidate)}
+    </div>
+
+    <div class="detail-section">
+      <h3>Best Assessments</h3>
+      ${
+        candidate.signals.best_assessments.length
+          ? `<div class="assessment-list">${candidate.signals.best_assessments
+              .map((item) => `<span>${item.skill}<strong>${item.score}</strong></span>`)
+              .join("")}</div>`
+          : `<div class="empty-state compact">No assessment scores linked.</div>`
+      }
     </div>
 
     <div class="detail-section">
@@ -452,6 +540,7 @@ function renderAll() {
   renderRole();
   renderKeywordDock();
   renderMetrics();
+  renderQualityBoard();
   renderSpotlight();
   renderList();
 }
