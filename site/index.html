@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AD-Redrob_scout  - Candidate Ranking Console</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Role and ranking controls">
+        <div class="brand">
+          <div class="brand-mark">RS</div>
+          <div>
+            <strong>AD -Redrob Scout</strong>
+            <span>Candidate ranking console</span>
+          </div>
+        </div>
+
+        <section class="side-panel role-panel">
+          <span class="eyebrow">Active role</span>
+          <h1 id="roleTitle">Senior AI Engineer</h1>
+          <p id="roleMeta">Founding team role, Pune / Noida hybrid</p>
+          <div class="need-list" id="mustHaveList"></div>
+        </section>
+
+        <section class="side-panel">
+          <div class="panel-heading">
+            <h2>Fit Controls</h2>
+            <button class="ghost-button" id="resetFilters" type="button">Reset</button>
+          </div>
+          <label class="field-label" for="scoreRange">
+            Minimum score <span id="scoreRangeValue">0.70</span>
+          </label>
+          <input id="scoreRange" type="range" min="0.55" max="0.95" step="0.01" value="0.70" />
+
+          <label class="check-row">
+            <input id="openOnly" type="checkbox" />
+            <span>Open to work only</span>
+          </label>
+          <label class="check-row">
+            <input id="fastNotice" type="checkbox" />
+            <span>Notice <= 60 days</span>
+          </label>
+          <label class="check-row">
+            <input id="indiaOnly" type="checkbox" />
+            <span>India logistics fit</span>
+          </label>
+        </section>
+
+        <section class="side-panel">
+          <h2>Scoring Recipe</h2>
+          <div class="weight-list" id="weightList"></div>
+        </section>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <span class="eyebrow">Shortlist generated from candidates.jsonl</span>
+            <h2>Trust-first AI recruiting shortlist</h2>
+          </div>
+          <div class="actions">
+            <label class="search-box" for="searchInput">
+              <span>Profile keyword</span>
+              <input id="searchInput" type="search" placeholder="try: Pinecone, NDCG, Noida, marketplace" />
+            </label>
+            <button class="primary-button" id="downloadCsv" type="button">Download CSV</button>
+          </div>
+        </header>
+
+        <section class="keyword-dock" id="keywordDock" aria-label="Quick profile keyword searches"></section>
+
+        <section class="metric-grid" id="metricGrid" aria-label="Shortlist metrics"></section>
+
+        <section class="spotlight" id="spotlight" aria-label="Top candidate spotlight"></section>
+
+        <section class="workspace">
+          <div class="list-pane">
+            <div class="section-heading">
+              <div>
+                <span class="eyebrow">Ranked candidates</span>
+                <h2 id="resultCount">Top 100</h2>
+              </div>
+              <div class="segment-control" role="tablist" aria-label="Candidate views">
+                <button class="segment active" data-view="all" type="button">All</button>
+                <button class="segment" data-view="top10" type="button">Top 10</button>
+                <button class="segment" data-view="ready" type="button">Recruiter-ready</button>
+                <button class="segment" data-view="concerns" type="button">Has concerns</button>
+              </div>
+            </div>
+            <div class="candidate-list" id="candidateList"></div>
+          </div>
+
+          <aside class="detail-pane" id="detailPane" aria-label="Candidate detail"></aside>
+        </section>
+      </main>
+    </div>
+
+    <script src="data/ranking-data.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>
